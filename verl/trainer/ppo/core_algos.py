@@ -107,6 +107,7 @@ class AdvantageEstimator(str, Enum):
     GRPO_VECTORIZED = "grpo_vectorized"
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
     TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
+    GDPO = "gdpo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -356,6 +357,86 @@ def compute_grpo_vectorized_outcome_advantage(
         advantages = scalars.unsqueeze(-1) * response_mask
         return advantages, advantages
 
+
+@register_adv_est(AdvantageEstimator.GDPO)  # or simply: @register_adv_est("gdpo")
+def compute_gdpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    score_list: Optional[list[torch.Tensor]] = None,
+    reward_weights: Optional[list[float]] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    GDPO: Group reward-Decoupled Normalization Policy Optimization.
+
+    Instead of summing all reward dimensions first (like GRPO), GDPO normalizes
+    each reward dimension independently within each group before aggregation.
+    This prevents a dominant reward signal from drowning out weaker ones.
+
+    Mathematical formulation:
+        Step 1 – Group-wise decoupled normalization (via GRPO per dimension):
+            For each reward dimension k, within each group g:
+            A_k = (r_k - μ_group(r_k)) / (σ_group(r_k) + ε)
+
+        Step 2 – Weighted aggregation:
+            A_sum = Σ_k  w_k · A_k
+
+        Step 3 – Batch-level normalization (via masked_whiten):
+            A_final = whiten(A_sum, response_mask)
+
+    Args:
+        token_level_rewards: (bs, response_length) – standard token-level rewards.
+            Used as fallback when score_list is not provided.
+        response_mask: (bs, response_length)
+        index: (bs,) – group id per sample (from ``uid``).
+        epsilon: Numerical stability constant.
+        norm_adv_by_std_in_grpo: Whether to normalize by std in GRPO.
+        config: Algorithm configuration (optional).
+        score_list: List of per-dimension token-level reward tensors,
+            each (bs, response_length). If None, falls back to [token_level_rewards].
+        reward_weights: Optional per-dimension weights. None → equal weights.
+
+    Note:
+        Ref GDPO (https://arxiv.org/abs/2601.05242).
+
+    Returns:
+        advantages: (bs, response_length)
+        returns:    (bs, response_length) – same as advantages (outcome-only).
+    """
+    if score_list is None:
+        score_list = [token_level_rewards]
+
+    num_scores = len(score_list)
+
+    if reward_weights is not None:
+        weights = torch.tensor(reward_weights, dtype=torch.float32, device=token_level_rewards.device)
+    else:
+        weights = torch.ones(num_scores, dtype=torch.float32, device=token_level_rewards.device)
+
+    new_advantage = None
+
+    for i in range(num_scores):
+        normalized_score, _ = compute_grpo_outcome_advantage(
+            token_level_rewards=score_list[i],
+            response_mask=response_mask,
+            index=index,
+            epsilon=epsilon,
+            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            config=config,
+        )
+
+        if new_advantage is None:
+            new_advantage = weights[i] * normalized_score
+        else:
+            new_advantage += weights[i] * normalized_score
+
+    advantages = verl_F.masked_whiten(new_advantage, response_mask) * response_mask
+
+    return advantages, advantages
 
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
 def compute_grpo_passk_outcome_advantage(
