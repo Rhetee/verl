@@ -366,8 +366,8 @@ def compute_gdpo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     config: Optional[AlgoConfig] = None,
-    score_list: Optional[list[torch.Tensor]] = None,
-    reward_weights: Optional[list[float]] = None,
+    non_tensor_batch: Optional[dict] = None,
+    batch: Optional[dict] = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -383,30 +383,59 @@ def compute_gdpo_outcome_advantage(
             A_k = (r_k - μ_group(r_k)) / (σ_group(r_k) + ε)
 
         Step 2 – Weighted aggregation:
-            A_sum = Σ_k  w_k · A_k
+            A_sum = Σ_k w_k · A_k
 
         Step 3 – Batch-level normalization (via masked_whiten):
             A_final = whiten(A_sum, response_mask)
 
     Args:
         token_level_rewards: (bs, response_length) – standard token-level rewards.
-            Used as fallback when score_list is not provided.
+            Used as fallback when per-dimension rewards are not provided.
         response_mask: (bs, response_length)
         index: (bs,) – group id per sample (from ``uid``).
         epsilon: Numerical stability constant.
         norm_adv_by_std_in_grpo: Whether to normalize by std in GRPO.
         config: Algorithm configuration (optional).
-        score_list: List of per-dimension token-level reward tensors,
-            each (bs, response_length). If None, falls back to [token_level_rewards].
-        reward_weights: Optional per-dimension weights. None → equal weights.
+        non_tensor_batch: Non-tensor batch data containing per-dimension reward scores.
+        batch: Batch data containing prompts, attention_mask, etc.
 
     Note:
         Ref GDPO (https://arxiv.org/abs/2601.05242).
 
     Returns:
         advantages: (bs, response_length)
-        returns:    (bs, response_length) – same as advantages (outcome-only).
+        returns: (bs, response_length) – same as advantages (outcome-only).
     """
+    score_list = None
+    reward_weights = None
+
+    if config is not None and non_tensor_batch is not None and batch is not None:
+        gdpo_reward_keys = config.get("gdpo_reward_keys", None)
+        assert gdpo_reward_keys, (
+            "GDPO requires 'algorithm.gdpo_reward_keys' listing the individual reward "
+            "component keys returned by compute_score (e.g. ['format_reward', 'accuracy_reward'])."
+        )
+        device = token_level_rewards.device
+        prompt_length = batch["prompts"].size(1)
+        valid_response_length = batch["attention_mask"][:, prompt_length:].sum(dim=1) - 1
+
+        score_list = []
+        for key in gdpo_reward_keys:
+            assert key in non_tensor_batch, (
+                f"GDPO reward key '{key}' not found in non_tensor_batch. "
+                f"Available keys: {list(non_tensor_batch.keys())}. "
+                f"Make sure your compute_score returns a dict containing '{key}'."
+            )
+            comp = non_tensor_batch[key]
+            rm_score = torch.tensor(np.asarray(comp, dtype=np.float32), device=device)
+            rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
+            rm_scores[torch.arange(rm_scores.size(0), device=device), valid_response_length] = rm_score
+            score_list.append(rm_scores)
+
+        gdpo_weights = config.get("gdpo_reward_weights", None)
+        if gdpo_weights is not None:
+            reward_weights = list(gdpo_weights)
+
     if score_list is None:
         score_list = [token_level_rewards]
 

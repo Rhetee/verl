@@ -199,35 +199,10 @@ def compute_advantage(
             adv_kwargs["index"] = data.non_tensor_batch["uid"]
         if "reward_baselines" in data.batch:  # optional
             adv_kwargs["reward_baselines"] = data.batch["reward_baselines"]
-        # GDPO: extract per-dimension reward components from non_tensor_batch
-        # and convert them to token-level tensors for compatibility with GRPO
+        # GDPO: pass raw data for per-dimension reward extraction
         if adv_estimator in (AdvantageEstimator.GDPO, "gdpo"):
-            gdpo_reward_keys = config.get("gdpo_reward_keys", None) if config is not None else None
-            assert gdpo_reward_keys, (
-                "GDPO requires 'algorithm.gdpo_reward_keys' listing the individual reward "
-                "component keys returned by compute_score (e.g. ['format_reward', 'accuracy_reward'])."
-            )
-            device = data.batch["token_level_rewards"].device
-            prompt_length = data.batch["prompts"].size(1)
-            valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1) - 1
-
-            score_list = []
-            for key in gdpo_reward_keys:
-                assert key in data.non_tensor_batch, (
-                    f"GDPO reward key '{key}' not found in non_tensor_batch. "
-                    f"Available keys: {list(data.non_tensor_batch.keys())}. "
-                    f"Make sure your compute_score returns a dict containing '{key}'."
-                )
-                comp = data.non_tensor_batch[key]
-                rm_score = torch.tensor(np.asarray(comp, dtype=np.float32), device=device)
-                rm_scores = torch.zeros_like(data.batch["response_mask"], dtype=torch.float32)
-                rm_scores[torch.arange(rm_scores.size(0), device=device), valid_response_length] = rm_score
-                score_list.append(rm_scores)
-
-            adv_kwargs["score_list"] = score_list
-            gdpo_weights = config.get("gdpo_reward_weights", None) if config is not None else None
-            if gdpo_weights is not None:
-                adv_kwargs["reward_weights"] = list(gdpo_weights)
+            adv_kwargs["non_tensor_batch"] = data.non_tensor_batch
+            adv_kwargs["batch"] = data.batch
         # Add sum_pi_squared for Optimal Token Baseline
         if adv_estimator in (AdvantageEstimator.OPTIMAL_TOKEN_BASELINE, AdvantageEstimator.TIR_OPTIMAL_TOKEN_BASELINE):
             # Check if sum_pi_squared is available
