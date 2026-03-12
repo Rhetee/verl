@@ -467,6 +467,7 @@ def compute_gdpo_outcome_advantage(
 
     return advantages, advantages
 
+
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
 def compute_grpo_passk_outcome_advantage(
     token_level_rewards: torch.Tensor,
